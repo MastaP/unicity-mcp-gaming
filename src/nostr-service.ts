@@ -7,6 +7,7 @@ import {
 } from "@unicitylabs/nostr-js-sdk";
 import type { Event } from "@unicitylabs/nostr-js-sdk";
 import type { Config } from "./config.js";
+import type { IdentityService } from "./identity-service.js";
 
 export interface PendingPayment {
   requestId: string;
@@ -19,20 +20,25 @@ export interface PendingPayment {
 }
 
 export class NostrService {
-  private client: NostrClient;
-  private keyManager: NostrKeyManager;
+  private client: NostrClient | null = null;
+  private keyManager: NostrKeyManager | null = null;
   private config: Config;
+  private identityService: IdentityService;
   private pendingPayments: Map<string, PendingPayment> = new Map();
   private connected = false;
 
-  constructor(config: Config) {
+  constructor(config: Config, identityService: IdentityService) {
     this.config = config;
-    this.keyManager = NostrKeyManager.fromPrivateKeyHex(config.privateKeyHex);
-    this.client = new NostrClient(this.keyManager);
+    this.identityService = identityService;
   }
 
   async connect(): Promise<void> {
     if (this.connected) return;
+
+    const identity = this.identityService.getIdentity();
+    const secretKey = Buffer.from(identity.privateKeyHex, "hex");
+    this.keyManager = NostrKeyManager.fromPrivateKey(secretKey);
+    this.client = new NostrClient(this.keyManager);
 
     await this.client.connect(this.config.relayUrl);
     this.connected = true;
@@ -40,11 +46,13 @@ export class NostrService {
     // Subscribe to incoming token transfers (payments to us)
     this.subscribeToPayments();
 
-    console.error(`Connected to Nostr relay: ${this.config.relayUrl}`);
+    console.error(`Nostr service connected to: ${this.config.relayUrl}`);
     console.error(`MCP pubkey: ${this.keyManager.getPublicKeyHex()}`);
   }
 
   private subscribeToPayments(): void {
+    if (!this.client || !this.keyManager) return;
+
     const myPubkey = this.keyManager.getPublicKeyHex();
 
     // Listen for token transfers addressed to us
@@ -60,9 +68,13 @@ export class NostrService {
         });
       },
     });
+
+    console.error("Subscribed to incoming token transfers");
   }
 
   private async handleIncomingTransfer(event: Event): Promise<void> {
+    if (!this.keyManager) return;
+
     try {
       // Check if this is a valid token transfer
       if (!TokenTransferProtocol.isTokenTransfer(event)) {
@@ -72,6 +84,8 @@ export class NostrService {
       const senderPubkey = TokenTransferProtocol.getSender(event);
       const amount = TokenTransferProtocol.getAmount(event);
 
+      console.error(`Received token transfer from ${senderPubkey.slice(0, 16)}... amount=${amount}`);
+
       // Find matching pending payment
       for (const [key, pending] of this.pendingPayments) {
         if (
@@ -79,32 +93,42 @@ export class NostrService {
           amount !== undefined &&
           amount >= pending.amount
         ) {
-          console.error(`Payment confirmed for ${pending.unicityId}`);
+          console.error(`Payment confirmed for ${pending.unicityId}!`);
           pending.resolve(true);
           this.pendingPayments.delete(key);
           return;
         }
       }
+
+      console.error("No matching pending payment found for this transfer");
     } catch (err) {
       console.error("Error processing transfer:", err);
     }
   }
 
   async resolvePubkey(unicityId: string): Promise<string | null> {
-    return this.client.queryPubkeyByNametag(unicityId);
+    if (!this.client) {
+      throw new Error("Nostr client not connected");
+    }
+    const cleanId = unicityId.replace("@unicity", "").replace("@", "").trim();
+    return this.client.queryPubkeyByNametag(cleanId);
   }
 
   async sendPaymentRequest(
     unicityId: string,
     userPubkey: string
   ): Promise<{ requestId: string; waitForPayment: () => Promise<boolean> }> {
-    const requestId = crypto.randomUUID().slice(0, 8);
+    if (!this.client) {
+      throw new Error("Nostr client not connected");
+    }
+
+    const requestId = Math.random().toString(36).substring(2, 10);
 
     await this.client.sendPaymentRequest(userPubkey, {
       amount: this.config.amount,
       coinId: this.config.coinId,
-      recipientNametag: this.config.recipientNametag,
-      message: `Gaming day pass for ${unicityId}`,
+      recipientNametag: this.config.nametag,
+      message: `Gaming day pass for @${unicityId}`,
       requestId,
     });
 
@@ -141,11 +165,16 @@ export class NostrService {
   }
 
   getPublicKey(): string {
+    if (!this.keyManager) {
+      throw new Error("Key manager not initialized");
+    }
     return this.keyManager.getPublicKeyHex();
   }
 
   disconnect(): void {
-    this.client.disconnect();
+    if (this.client) {
+      this.client.disconnect();
+    }
     this.connected = false;
   }
 }

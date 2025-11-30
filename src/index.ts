@@ -1,7 +1,9 @@
+import "dotenv/config";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { loadConfig, type Config } from "./config.js";
+import { IdentityService } from "./identity-service.js";
 import { NostrService } from "./nostr-service.js";
 import { PaymentTracker } from "./payment-tracker.js";
 import type { Game, SessionState } from "./types.js";
@@ -30,9 +32,10 @@ const session: SessionState = {
   pubkeyHex: null,
 };
 
+let config: Config;
+let identityService: IdentityService;
 let nostrService: NostrService;
 let paymentTracker: PaymentTracker;
-let config: Config;
 
 const server = new McpServer({
   name: "sphere-gaming",
@@ -64,20 +67,20 @@ server.tool(
       };
     }
 
-    session.unicityId = unicity_id;
+    session.unicityId = unicity_id.replace("@unicity", "").replace("@", "").trim();
     session.pubkeyHex = pubkey;
 
     // Check if user already has a valid pass
-    const hasPass = paymentTracker.hasValidPass(unicity_id);
+    const hasPass = paymentTracker.hasValidPass(session.unicityId);
     const passStatus = hasPass
-      ? `You have an active day pass (${paymentTracker.formatRemainingTime(unicity_id)}).`
+      ? `You have an active day pass (${paymentTracker.formatRemainingTime(session.unicityId)}).`
       : "You don't have an active day pass. Use get_game to request access.";
 
     return {
       content: [
         {
           type: "text" as const,
-          text: `Unicity ID set to "${unicity_id}". ${passStatus}`,
+          text: `Unicity ID set to "@${session.unicityId}". ${passStatus}`,
         },
       ],
     };
@@ -111,11 +114,9 @@ server.tool(
             type: "text" as const,
             text: JSON.stringify(
               {
-                unicityId: session.unicityId,
+                unicityId: `@${session.unicityId}`,
                 hasAccess: true,
-                remainingTime: paymentTracker.formatRemainingTime(
-                  session.unicityId
-                ),
+                remainingTime: paymentTracker.formatRemainingTime(session.unicityId),
               },
               null,
               2
@@ -131,10 +132,9 @@ server.tool(
           type: "text" as const,
           text: JSON.stringify(
             {
-              unicityId: session.unicityId,
+              unicityId: `@${session.unicityId}`,
               hasAccess: false,
-              message:
-                "No active day pass. Use get_game to request a game and complete payment.",
+              message: "No active day pass. Use get_game to request a game and complete payment.",
             },
             null,
             2
@@ -236,9 +236,7 @@ server.tool(
                   url: gameData.url,
                   description: gameData.description,
                 },
-                passRemaining: paymentTracker.formatRemainingTime(
-                  session.unicityId
-                ),
+                passRemaining: paymentTracker.formatRemainingTime(session.unicityId),
               },
               null,
               2
@@ -249,12 +247,11 @@ server.tool(
     }
 
     // No valid pass - initiate payment
-    const { requestId, waitForPayment } = await nostrService.sendPaymentRequest(
+    const { requestId } = await nostrService.sendPaymentRequest(
       session.unicityId,
       session.pubkeyHex
     );
 
-    // Return immediately with payment request info
     return {
       content: [
         {
@@ -262,10 +259,10 @@ server.tool(
           text: JSON.stringify(
             {
               status: "payment_required",
-              message: `Payment request sent to your wallet (${session.unicityId}). Please approve the payment to get a day pass.`,
+              message: `Payment request sent to your wallet (@${session.unicityId}). Please approve the payment to get a day pass.`,
               requestId,
-              waitingForPayment: true,
               timeoutSeconds: config.paymentTimeoutSeconds,
+              nextStep: "Use confirm_payment tool to wait for payment confirmation.",
             },
             null,
             2
@@ -304,9 +301,7 @@ server.tool(
               {
                 status: "already_active",
                 message: "You already have an active day pass.",
-                remainingTime: paymentTracker.formatRemainingTime(
-                  session.unicityId
-                ),
+                remainingTime: paymentTracker.formatRemainingTime(session.unicityId),
               },
               null,
               2
@@ -335,9 +330,7 @@ server.tool(
                 status: "payment_confirmed",
                 message: "Payment received! Day pass granted.",
                 validUntil: new Date(pass.expiresAt).toISOString(),
-                remainingTime: paymentTracker.formatRemainingTime(
-                  session.unicityId
-                ),
+                remainingTime: paymentTracker.formatRemainingTime(session.unicityId),
               },
               null,
               2
@@ -354,8 +347,7 @@ server.tool(
           text: JSON.stringify(
             {
               status: "payment_timeout",
-              message:
-                "Payment not received within timeout. Please try again or check your wallet.",
+              message: "Payment not received within timeout. Please try again or check your wallet.",
             },
             null,
             2
@@ -368,20 +360,35 @@ server.tool(
 );
 
 async function main() {
+  console.error("Starting Sphere Gaming MCP Server...");
+
   // Load configuration
   config = loadConfig();
 
-  // Initialize services
-  nostrService = new NostrService(config);
+  // Initialize identity service (creates/loads nametag)
+  console.error("Initializing identity...");
+  identityService = new IdentityService(config);
+  await identityService.initialize();
+
+  // Initialize payment tracker
   paymentTracker = new PaymentTracker(config.dayPassDurationHours);
 
-  // Connect to Nostr relay
+  // Initialize Nostr service
+  console.error("Connecting to Nostr...");
+  nostrService = new NostrService(config, identityService);
   await nostrService.connect();
 
   // Start MCP server
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  console.error("Sphere Gaming MCP server running on stdio");
+
+  console.error("=".repeat(60));
+  console.error("Sphere Gaming MCP Server is ready!");
+  console.error(`  Nametag: @${config.nametag}`);
+  console.error(`  Relay: ${config.relayUrl}`);
+  console.error(`  Payment amount: ${config.amount}`);
+  console.error(`  Day pass duration: ${config.dayPassDurationHours}h`);
+  console.error("=".repeat(60));
 }
 
 main().catch((error) => {
