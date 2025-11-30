@@ -31,7 +31,6 @@ ENV DATA_DIR=/app/data
 #
 # Optional environment variables:
 # MCP_PRIVATE_KEY_HEX - Private key (generated if not provided)
-# MCP_NONCE_HEX - Nonce for address derivation
 # NOSTR_RELAY_URL - Nostr relay URL
 # AGGREGATOR_URL - Unicity aggregator URL
 # AGGREGATOR_API_KEY - Aggregator API key

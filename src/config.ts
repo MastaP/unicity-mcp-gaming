@@ -1,5 +1,3 @@
-import { randomBytes } from "crypto";
-
 export interface Config {
   // Nostr relay
   relayUrl: string;
@@ -9,8 +7,7 @@ export interface Config {
   aggregatorApiKey: string;
 
   // MCP server identity
-  privateKeyHex: string;
-  nonce: string;
+  privateKeyHex: string | null;
   nametag: string;
 
   // Payment settings
@@ -28,26 +25,8 @@ export interface Config {
 }
 
 export function loadConfig(): Config {
-  // Check for existing private key or generate new one
-  let privateKeyHex = process.env.MCP_PRIVATE_KEY_HEX;
-  let nonce = process.env.MCP_NONCE_HEX;
-
-  if (!privateKeyHex) {
-    // Generate new keypair
-    privateKeyHex = randomBytes(32).toString("hex");
-    nonce = randomBytes(32).toString("hex");
-    console.error("=".repeat(60));
-    console.error("IMPORTANT: No private key found. Generated new identity:");
-    console.error(`MCP_PRIVATE_KEY_HEX=${privateKeyHex}`);
-    console.error(`MCP_NONCE_HEX=${nonce}`);
-    console.error("Save these values to your environment for persistence!");
-    console.error("=".repeat(60));
-  }
-
-  if (!nonce) {
-    nonce = randomBytes(32).toString("hex");
-    console.error(`Generated new nonce: MCP_NONCE_HEX=${nonce}`);
-  }
+  // Private key is optional - will be auto-generated and saved to file if not provided
+  const privateKeyHex = process.env.MCP_PRIVATE_KEY_HEX || null;
 
   const nametag = process.env.MCP_NAMETAG;
   if (!nametag) {
@@ -63,10 +42,9 @@ export function loadConfig(): Config {
 
   return {
     relayUrl: process.env.NOSTR_RELAY_URL || "wss://nostr-relay.testnet.unicity.network",
-    aggregatorUrl: process.env.AGGREGATOR_URL || "https://aggregator-test.unicity.network",
+    aggregatorUrl: process.env.AGGREGATOR_URL || "https://goggregator-test.unicity.network",
     aggregatorApiKey: process.env.AGGREGATOR_API_KEY || "sk_06365a9c44654841a366068bcfc68986",
     privateKeyHex,
-    nonce,
     nametag: cleanNametag,
     coinId,
     amount: BigInt(process.env.PAYMENT_AMOUNT || "1000000000"),

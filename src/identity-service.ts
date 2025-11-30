@@ -24,13 +24,16 @@ import trustbaseJson from "./trustbase-testnet.json" with { type: "json" };
 const UNICITY_TOKEN_TYPE_HEX =
   "f8aa13834268d29355ff12183066f0cb902003629bbc5eb9ef0efbe397867509";
 
+export interface StoredIdentity {
+  privateKeyHex: string;
+  createdAt: number;
+}
+
 export interface Identity {
   privateKeyHex: string;
-  nonce: string;
   publicKeyHex: string;
   nametag: string;
   walletAddress: string;
-  nametagToken: object | null;
 }
 
 export class IdentityService {
@@ -40,7 +43,8 @@ export class IdentityService {
   private rootTrustBase: RootTrustBase;
   private identity: Identity | null = null;
   private signingService: SigningService | null = null;
-  private nametagToken: Token<unknown> | null = null;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private nametagToken: Token<any> | null = null;
 
   constructor(config: Config) {
     this.config = config;
@@ -55,8 +59,14 @@ export class IdentityService {
   async initialize(): Promise<void> {
     console.error("Initializing MCP identity...");
 
+    // Ensure data directory exists
+    this.ensureDataDir();
+
+    // Load or create identity (private key)
+    const privateKeyHex = this.loadOrCreateIdentity();
+
     // Create signing service from private key
-    const secret = Buffer.from(this.config.privateKeyHex, "hex");
+    const secret = Buffer.from(privateKeyHex, "hex");
     this.signingService = await SigningService.createFromSecret(secret);
     const publicKeyHex = Buffer.from(this.signingService.publicKey).toString("hex");
 
@@ -64,12 +74,10 @@ export class IdentityService {
     const walletAddress = await this.deriveWalletAddress();
 
     this.identity = {
-      privateKeyHex: this.config.privateKeyHex,
-      nonce: this.config.nonce,
+      privateKeyHex,
       publicKeyHex,
       nametag: this.config.nametag,
       walletAddress,
-      nametagToken: null,
     };
 
     console.error(`Identity initialized:`);
@@ -82,6 +90,61 @@ export class IdentityService {
 
     // Ensure Nostr binding is published
     await this.ensureNostrBinding();
+  }
+
+  private ensureDataDir(): void {
+    const dataDir = this.config.dataDir;
+    if (!fs.existsSync(dataDir)) {
+      fs.mkdirSync(dataDir, { recursive: true });
+      console.error(`Created data directory: ${dataDir}`);
+    }
+  }
+
+  private getIdentityPath(): string {
+    return path.join(this.config.dataDir, "identity.json");
+  }
+
+  private getNametagPath(): string {
+    return path.join(this.config.dataDir, `nametag-${this.config.nametag}.json`);
+  }
+
+  private loadOrCreateIdentity(): string {
+    const identityPath = this.getIdentityPath();
+
+    // First check if identity file exists
+    if (fs.existsSync(identityPath)) {
+      try {
+        const data = fs.readFileSync(identityPath, "utf-8");
+        const stored: StoredIdentity = JSON.parse(data);
+        console.error(`Loaded existing identity from ${identityPath}`);
+        return stored.privateKeyHex;
+      } catch (error) {
+        console.error(`Failed to load identity file, will create new:`, error);
+      }
+    }
+
+    // Check if provided via environment (for migration/override)
+    if (this.config.privateKeyHex) {
+      const identity: StoredIdentity = {
+        privateKeyHex: this.config.privateKeyHex,
+        createdAt: Date.now(),
+      };
+      fs.writeFileSync(identityPath, JSON.stringify(identity, null, 2));
+      console.error(`Saved identity from env vars to ${identityPath}`);
+      return identity.privateKeyHex;
+    }
+
+    // Generate new identity
+    const privateKeyHex = randomBytes(32).toString("hex");
+    const identity: StoredIdentity = {
+      privateKeyHex,
+      createdAt: Date.now(),
+    };
+
+    fs.writeFileSync(identityPath, JSON.stringify(identity, null, 2));
+    console.error(`Generated new identity and saved to ${identityPath}`);
+
+    return privateKeyHex;
   }
 
   private async deriveWalletAddress(): Promise<string> {
@@ -121,11 +184,10 @@ export class IdentityService {
 
   private async ensureNametag(): Promise<void> {
     // Try to load existing nametag token from storage
-    const storedToken = this.loadNametagFromStorage();
+    const storedToken = await this.loadNametagFromStorage();
     if (storedToken) {
       console.error(`Loaded existing nametag token from storage`);
       this.nametagToken = storedToken;
-      this.identity!.nametagToken = storedToken.toJSON();
       return;
     }
 
@@ -148,7 +210,8 @@ export class IdentityService {
     );
 
     const MAX_RETRIES = 3;
-    let commitment: MintCommitment<unknown> | null = null;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let commitment: MintCommitment<any> | null = null;
 
     for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
       try {
@@ -207,7 +270,7 @@ export class IdentityService {
       mintSalt
     );
 
-    const token = Token.mint(
+    const token = await Token.mint(
       this.rootTrustBase,
       new TokenState(nametagPredicate, null),
       genesisTransaction
@@ -216,14 +279,17 @@ export class IdentityService {
     console.error(`Nametag @${nametag} minted successfully!`);
 
     this.nametagToken = token;
-    this.identity!.nametagToken = token.toJSON();
     this.saveNametagToStorage(token);
   }
 
   private async ensureNostrBinding(): Promise<void> {
     console.error("Checking Nostr binding...");
 
-    const secretKey = Buffer.from(this.config.privateKeyHex, "hex");
+    if (!this.identity) {
+      throw new Error("Identity not initialized");
+    }
+
+    const secretKey = Buffer.from(this.identity.privateKeyHex, "hex");
     const keyManager = NostrKeyManager.fromPrivateKey(secretKey);
     const client = new NostrClient(keyManager);
 
@@ -270,41 +336,34 @@ export class IdentityService {
     }
   }
 
-  private getStoragePath(): string {
-    const dataDir = this.config.dataDir;
-    if (!fs.existsSync(dataDir)) {
-      fs.mkdirSync(dataDir, { recursive: true });
-    }
-    return path.join(dataDir, `nametag-${this.config.nametag}.json`);
-  }
-
-  private loadNametagFromStorage(): Token<unknown> | null {
-    const storagePath = this.getStoragePath();
-    if (!fs.existsSync(storagePath)) {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private async loadNametagFromStorage(): Promise<Token<any> | null> {
+    const nametagPath = this.getNametagPath();
+    if (!fs.existsSync(nametagPath)) {
       return null;
     }
 
     try {
-      const data = fs.readFileSync(storagePath, "utf-8");
+      const data = fs.readFileSync(nametagPath, "utf-8");
       const json = JSON.parse(data);
-      // Note: Token.fromJSON is async in newer versions
-      // For now, store the raw JSON and recreate when needed
-      return null; // We'll handle this differently
+      const token = await Token.fromJSON(json.token);
+      return token;
     } catch (error) {
       console.error("Failed to load nametag from storage:", error);
       return null;
     }
   }
 
-  private saveNametagToStorage(token: Token<unknown>): void {
-    const storagePath = this.getStoragePath();
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private saveNametagToStorage(token: Token<any>): void {
+    const nametagPath = this.getNametagPath();
     const data = {
       nametag: this.config.nametag,
       token: token.toJSON(),
       timestamp: Date.now(),
     };
-    fs.writeFileSync(storagePath, JSON.stringify(data, null, 2));
-    console.error(`Nametag token saved to ${storagePath}`);
+    fs.writeFileSync(nametagPath, JSON.stringify(data, null, 2));
+    console.error(`Nametag token saved to ${nametagPath}`);
   }
 
   private sleep(ms: number): Promise<void> {
@@ -325,7 +384,8 @@ export class IdentityService {
     return this.signingService;
   }
 
-  getNametagToken(): Token<unknown> | null {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  getNametagToken(): Token<any> | null {
     return this.nametagToken;
   }
 
