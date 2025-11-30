@@ -232,7 +232,7 @@ server.tool(
     }
 
     // No valid pass - initiate payment
-    const { requestId } = await nostrService.sendPaymentRequest(
+    const { eventId } = await nostrService.sendPaymentRequest(
       unicityId,
       pubkey
     );
@@ -245,7 +245,7 @@ server.tool(
             {
               status: "payment_required",
               message: `Payment request sent to your wallet (@${unicityId}). Please approve the payment to get a day pass.`,
-              requestId,
+              paymentRequestEventId: eventId,
               timeoutSeconds: config.paymentTimeoutSeconds,
               nextStep: `Use confirm_payment with unicity_id "${unicityId}" to wait for payment confirmation.`,
             },
