@@ -263,13 +263,17 @@ server.tool(
 // Tool: Wait for payment confirmation
 server.tool(
   "confirm_payment",
-  "Wait for payment confirmation after a payment request has been sent",
+  "Wait for payment confirmation after a payment request has been sent. Optionally specify a game to get direct access after payment.",
   {
     unicity_id: z
       .string()
       .describe("Your Unicity ID (nametag) that the payment request was sent to"),
+    game: z
+      .string()
+      .optional()
+      .describe("Optional: Game to access after payment (unicity-quake, boxy-run, or unirun)"),
   },
-  async ({ unicity_id }) => {
+  async ({ unicity_id, game }) => {
     const unicityId = cleanUnicityId(unicity_id);
 
     // Resolve pubkey
@@ -286,21 +290,48 @@ server.tool(
       };
     }
 
+    // Validate game if provided
+    let gameData: Game | undefined;
+    let normalizedGameId: string | undefined;
+    if (game) {
+      normalizedGameId = game.toLowerCase().replace(/\s+/g, "-");
+      gameData = GAMES[normalizedGameId];
+      if (!gameData) {
+        const availableGames = Object.keys(GAMES).join(", ");
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `Game "${game}" not found. Available games: ${availableGames}`,
+            },
+          ],
+          isError: true,
+        };
+      }
+    }
+
     // Check if already has pass
     if (paymentTracker.hasValidPass(unicityId)) {
+      const result: Record<string, unknown> = {
+        status: "already_active",
+        message: "You already have an active day pass.",
+        remainingTime: paymentTracker.formatRemainingTime(unicityId),
+      };
+
+      if (gameData && normalizedGameId) {
+        result.game = {
+          id: normalizedGameId,
+          name: gameData.name,
+          url: gameData.url,
+          description: gameData.description,
+        };
+      }
+
       return {
         content: [
           {
             type: "text" as const,
-            text: JSON.stringify(
-              {
-                status: "already_active",
-                message: "You already have an active day pass.",
-                remainingTime: paymentTracker.formatRemainingTime(unicityId),
-              },
-              null,
-              2
-            ),
+            text: JSON.stringify(result, null, 2),
           },
         ],
       };
@@ -316,20 +347,28 @@ server.tool(
 
     if (paymentReceived) {
       const pass = paymentTracker.grantDayPass(unicityId);
+
+      const result: Record<string, unknown> = {
+        status: "payment_confirmed",
+        message: "Payment received! Day pass granted.",
+        validUntil: new Date(pass.expiresAt).toISOString(),
+        remainingTime: paymentTracker.formatRemainingTime(unicityId),
+      };
+
+      if (gameData && normalizedGameId) {
+        result.game = {
+          id: normalizedGameId,
+          name: gameData.name,
+          url: gameData.url,
+          description: gameData.description,
+        };
+      }
+
       return {
         content: [
           {
             type: "text" as const,
-            text: JSON.stringify(
-              {
-                status: "payment_confirmed",
-                message: "Payment received! Day pass granted.",
-                validUntil: new Date(pass.expiresAt).toISOString(),
-                remainingTime: paymentTracker.formatRemainingTime(unicityId),
-              },
-              null,
-              2
-            ),
+            text: JSON.stringify(result, null, 2),
           },
         ],
       };
