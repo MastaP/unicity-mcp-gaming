@@ -19,13 +19,14 @@ MCP (Model Context Protocol) server for the Unicity gaming platform. Provides LL
 
 ## MCP Tools
 
-| Tool | Description |
-|------|-------------|
-| `set_unicity_id` | Set your Unicity ID (nametag) to access games |
-| `check_access` | Check your current access status and day pass validity |
-| `list_games` | List all available games |
-| `get_game` | Get access to a specific game (initiates payment if needed) |
-| `confirm_payment` | Wait for payment confirmation |
+| Tool | Parameters | Description |
+|------|------------|-------------|
+| `list_games` | - | List all available games |
+| `check_access` | `unicity_id` | Check access status and day pass validity |
+| `get_game` | `unicity_id`, `game` | Get access to a specific game (initiates payment if needed) |
+| `confirm_payment` | `unicity_id` | Wait for payment confirmation |
+
+All tools that require user identity take `unicity_id` as a parameter, making the API stateless and suitable for multi-user scenarios.
 
 ## Quick Start
 
@@ -131,16 +132,15 @@ Or for local development:
 
 ## Example Workflow
 
-1. **User sets their Unicity ID:**
+1. **User lists available games:**
    ```
-   Tool: set_unicity_id
-   Args: { "unicity_id": "alice" }
+   Tool: list_games
    ```
 
-2. **User requests a game:**
+2. **User requests a game with their Unicity ID:**
    ```
    Tool: get_game
-   Args: { "game": "unicity-quake" }
+   Args: { "unicity_id": "alice", "game": "unicity-quake" }
    ```
 
 3. **If no day pass, payment is requested.** The user receives a payment request in their Unicity wallet.
@@ -148,6 +148,7 @@ Or for local development:
 4. **User confirms payment:**
    ```
    Tool: confirm_payment
+   Args: { "unicity_id": "alice" }
    ```
 
 5. **On successful payment, user gets game URL and 24h access.**

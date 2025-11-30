@@ -6,7 +6,7 @@ import { loadConfig, type Config } from "./config.js";
 import { IdentityService } from "./identity-service.js";
 import { NostrService } from "./nostr-service.js";
 import { PaymentTracker } from "./payment-tracker.js";
-import type { Game, SessionState } from "./types.js";
+import type { Game } from "./types.js";
 
 const GAMES: Record<string, Game> = {
   "unicity-quake": {
@@ -26,11 +26,9 @@ const GAMES: Record<string, Game> = {
   },
 };
 
-// Session state (per MCP connection)
-const session: SessionState = {
-  unicityId: null,
-  pubkeyHex: null,
-};
+// Cache for resolved pubkeys (unicity_id -> pubkey)
+const pubkeyCache: Map<string, { pubkey: string; timestamp: number }> = new Map();
+const PUBKEY_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 
 let config: Config;
 let identityService: IdentityService;
@@ -42,70 +40,57 @@ const server = new McpServer({
   version: "1.0.0",
 });
 
-// Tool: Set Unicity ID
+// Helper: Resolve and cache pubkey for a unicity_id
+async function resolvePubkey(unicityId: string): Promise<string | null> {
+  const cleanId = unicityId.replace("@unicity", "").replace("@", "").trim();
+
+  // Check cache
+  const cached = pubkeyCache.get(cleanId);
+  if (cached && Date.now() - cached.timestamp < PUBKEY_CACHE_TTL_MS) {
+    return cached.pubkey;
+  }
+
+  // Resolve from Nostr
+  const pubkey = await nostrService.resolvePubkey(cleanId);
+  if (pubkey) {
+    pubkeyCache.set(cleanId, { pubkey, timestamp: Date.now() });
+  }
+
+  return pubkey;
+}
+
+// Helper: Clean unicity_id
+function cleanUnicityId(unicityId: string): string {
+  return unicityId.replace("@unicity", "").replace("@", "").trim();
+}
+
+// Tool: Check access status
 server.tool(
-  "set_unicity_id",
-  "Set your Unicity ID (nametag) to access games. This is required before requesting game access.",
+  "check_access",
+  "Check access status and day pass validity for a Unicity ID",
   {
     unicity_id: z
       .string()
-      .describe("Your Unicity ID (nametag minted on Unicity blockchain)"),
+      .describe("Unicity ID (nametag) to check access for"),
   },
   async ({ unicity_id }) => {
-    // Resolve nametag to pubkey
-    const pubkey = await nostrService.resolvePubkey(unicity_id);
+    const unicityId = cleanUnicityId(unicity_id);
 
+    // Verify the unicity_id exists
+    const pubkey = await resolvePubkey(unicityId);
     if (!pubkey) {
       return {
         content: [
           {
             type: "text" as const,
-            text: `Could not find Unicity ID "${unicity_id}". Please make sure you have minted your nametag and published your Nostr binding.`,
+            text: `Could not find Unicity ID "${unicity_id}". Make sure the nametag is minted and has a Nostr binding.`,
           },
         ],
         isError: true,
       };
     }
 
-    session.unicityId = unicity_id.replace("@unicity", "").replace("@", "").trim();
-    session.pubkeyHex = pubkey;
-
-    // Check if user already has a valid pass
-    const hasPass = paymentTracker.hasValidPass(session.unicityId);
-    const passStatus = hasPass
-      ? `You have an active day pass (${paymentTracker.formatRemainingTime(session.unicityId)}).`
-      : "You don't have an active day pass. Use get_game to request access.";
-
-    return {
-      content: [
-        {
-          type: "text" as const,
-          text: `Unicity ID set to "@${session.unicityId}". ${passStatus}`,
-        },
-      ],
-    };
-  }
-);
-
-// Tool: Check access status
-server.tool(
-  "check_access",
-  "Check your current access status and day pass validity",
-  {},
-  async () => {
-    if (!session.unicityId) {
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: "No Unicity ID set. Please use set_unicity_id first.",
-          },
-        ],
-        isError: true,
-      };
-    }
-
-    const hasPass = paymentTracker.hasValidPass(session.unicityId);
+    const hasPass = paymentTracker.hasValidPass(unicityId);
 
     if (hasPass) {
       return {
@@ -114,9 +99,9 @@ server.tool(
             type: "text" as const,
             text: JSON.stringify(
               {
-                unicityId: `@${session.unicityId}`,
+                unicityId: `@${unicityId}`,
                 hasAccess: true,
-                remainingTime: paymentTracker.formatRemainingTime(session.unicityId),
+                remainingTime: paymentTracker.formatRemainingTime(unicityId),
               },
               null,
               2
@@ -132,7 +117,7 @@ server.tool(
           type: "text" as const,
           text: JSON.stringify(
             {
-              unicityId: `@${session.unicityId}`,
+              unicityId: `@${unicityId}`,
               hasAccess: false,
               message: "No active day pass. Use get_game to request a game and complete payment.",
             },
@@ -157,12 +142,6 @@ server.tool(
       description: game.description,
     }));
 
-    const accessNote = session.unicityId
-      ? paymentTracker.hasValidPass(session.unicityId)
-        ? "You have an active day pass."
-        : "You need a day pass to access games."
-      : "Set your Unicity ID first to access games.";
-
     return {
       content: [
         {
@@ -170,7 +149,7 @@ server.tool(
           text: JSON.stringify(
             {
               games: gameList,
-              accessNote,
+              note: "Use get_game with your unicity_id to access a game.",
             },
             null,
             2
@@ -186,18 +165,24 @@ server.tool(
   "get_game",
   "Get access to a specific game. Requires a valid day pass or will initiate payment.",
   {
+    unicity_id: z
+      .string()
+      .describe("Your Unicity ID (nametag)"),
     game: z
       .string()
       .describe("Game identifier (unicity-quake, boxy-run, or unirun)"),
   },
-  async ({ game }) => {
-    // Check if Unicity ID is set
-    if (!session.unicityId || !session.pubkeyHex) {
+  async ({ unicity_id, game }) => {
+    const unicityId = cleanUnicityId(unicity_id);
+
+    // Resolve pubkey
+    const pubkey = await resolvePubkey(unicityId);
+    if (!pubkey) {
       return {
         content: [
           {
             type: "text" as const,
-            text: "Please set your Unicity ID first using set_unicity_id.",
+            text: `Could not find Unicity ID "${unicity_id}". Make sure the nametag is minted and has a Nostr binding.`,
           },
         ],
         isError: true,
@@ -222,7 +207,7 @@ server.tool(
     }
 
     // Check if user has valid day pass
-    if (paymentTracker.hasValidPass(session.unicityId)) {
+    if (paymentTracker.hasValidPass(unicityId)) {
       return {
         content: [
           {
@@ -236,7 +221,7 @@ server.tool(
                   url: gameData.url,
                   description: gameData.description,
                 },
-                passRemaining: paymentTracker.formatRemainingTime(session.unicityId),
+                passRemaining: paymentTracker.formatRemainingTime(unicityId),
               },
               null,
               2
@@ -248,8 +233,8 @@ server.tool(
 
     // No valid pass - initiate payment
     const { requestId } = await nostrService.sendPaymentRequest(
-      session.unicityId,
-      session.pubkeyHex
+      unicityId,
+      pubkey
     );
 
     return {
@@ -259,10 +244,10 @@ server.tool(
           text: JSON.stringify(
             {
               status: "payment_required",
-              message: `Payment request sent to your wallet (@${session.unicityId}). Please approve the payment to get a day pass.`,
+              message: `Payment request sent to your wallet (@${unicityId}). Please approve the payment to get a day pass.`,
               requestId,
               timeoutSeconds: config.paymentTimeoutSeconds,
-              nextStep: "Use confirm_payment tool to wait for payment confirmation.",
+              nextStep: `Use confirm_payment with unicity_id "${unicityId}" to wait for payment confirmation.`,
             },
             null,
             2
@@ -277,14 +262,22 @@ server.tool(
 server.tool(
   "confirm_payment",
   "Wait for payment confirmation after a payment request has been sent",
-  {},
-  async () => {
-    if (!session.unicityId || !session.pubkeyHex) {
+  {
+    unicity_id: z
+      .string()
+      .describe("Your Unicity ID (nametag) that the payment request was sent to"),
+  },
+  async ({ unicity_id }) => {
+    const unicityId = cleanUnicityId(unicity_id);
+
+    // Resolve pubkey
+    const pubkey = await resolvePubkey(unicityId);
+    if (!pubkey) {
       return {
         content: [
           {
             type: "text" as const,
-            text: "No active session. Please set your Unicity ID first.",
+            text: `Could not find Unicity ID "${unicity_id}". Make sure the nametag is minted and has a Nostr binding.`,
           },
         ],
         isError: true,
@@ -292,7 +285,7 @@ server.tool(
     }
 
     // Check if already has pass
-    if (paymentTracker.hasValidPass(session.unicityId)) {
+    if (paymentTracker.hasValidPass(unicityId)) {
       return {
         content: [
           {
@@ -301,7 +294,7 @@ server.tool(
               {
                 status: "already_active",
                 message: "You already have an active day pass.",
-                remainingTime: paymentTracker.formatRemainingTime(session.unicityId),
+                remainingTime: paymentTracker.formatRemainingTime(unicityId),
               },
               null,
               2
@@ -313,14 +306,14 @@ server.tool(
 
     // Send new payment request and wait
     const { waitForPayment } = await nostrService.sendPaymentRequest(
-      session.unicityId,
-      session.pubkeyHex
+      unicityId,
+      pubkey
     );
 
     const paymentReceived = await waitForPayment();
 
     if (paymentReceived) {
-      const pass = paymentTracker.grantDayPass(session.unicityId);
+      const pass = paymentTracker.grantDayPass(unicityId);
       return {
         content: [
           {
@@ -330,7 +323,7 @@ server.tool(
                 status: "payment_confirmed",
                 message: "Payment received! Day pass granted.",
                 validUntil: new Date(pass.expiresAt).toISOString(),
-                remainingTime: paymentTracker.formatRemainingTime(session.unicityId),
+                remainingTime: paymentTracker.formatRemainingTime(unicityId),
               },
               null,
               2

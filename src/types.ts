@@ -16,8 +16,3 @@ export interface PaymentRequest {
   amount: bigint;
   createdAt: number;
 }
-
-export interface SessionState {
-  unicityId: string | null;
-  pubkeyHex: string | null;
-}
