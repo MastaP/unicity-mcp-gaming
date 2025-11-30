@@ -6,6 +6,7 @@ import { loadConfig, type Config } from "./config.js";
 import { IdentityService } from "./identity-service.js";
 import { NostrService } from "./nostr-service.js";
 import { PaymentTracker } from "./payment-tracker.js";
+import { WalletService } from "./wallet-service.js";
 import type { Game } from "./types.js";
 
 const GAMES: Record<string, Game> = {
@@ -34,6 +35,7 @@ let config: Config;
 let identityService: IdentityService;
 let nostrService: NostrService;
 let paymentTracker: PaymentTracker;
+let walletService: WalletService;
 
 const server = new McpServer({
   name: "sphere-gaming",
@@ -352,6 +354,68 @@ server.tool(
   }
 );
 
+// Tool: Get wallet balance (requires password)
+server.tool(
+  "get_wallet_balance",
+  "Get the total token balance in the MCP wallet (requires admin password)",
+  {
+    password: z
+      .string()
+      .describe("Admin password for authentication"),
+  },
+  async ({ password }) => {
+    // Verify password
+    if (password !== config.adminPassword) {
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: "Invalid admin password.",
+          },
+        ],
+        isError: true,
+      };
+    }
+
+    try {
+      const summary = await walletService.getWalletSummary();
+
+      // Format balances for display
+      const balanceInfo = summary.balances.map((b) => ({
+        coinId: b.coinId,
+        amount: b.amount.toString(),
+        tokenCount: b.tokenCount,
+      }));
+
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify(
+              {
+                totalTokenFiles: summary.totalTokens,
+                balances: balanceInfo,
+              },
+              null,
+              2
+            ),
+          },
+        ],
+      };
+    } catch (error) {
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: `Error reading wallet: ${error instanceof Error ? error.message : "Unknown error"}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  }
+);
+
 async function main() {
   console.error("Starting Sphere Gaming MCP Server...");
 
@@ -365,6 +429,9 @@ async function main() {
 
   // Initialize payment tracker
   paymentTracker = new PaymentTracker(config.dayPassDurationHours);
+
+  // Initialize wallet service
+  walletService = new WalletService(config);
 
   // Initialize Nostr service
   console.error("Connecting to Nostr...");

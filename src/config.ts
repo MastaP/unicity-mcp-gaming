@@ -22,6 +22,18 @@ export interface Config {
 
   // Data directory for persistence
   dataDir: string;
+
+  // Admin password for sensitive operations
+  adminPassword: string;
+}
+
+function generatePassword(): string {
+  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789";
+  let password = "";
+  for (let i = 0; i < 16; i++) {
+    password += chars.charAt(Math.floor(Math.random() * chars.length));
+  }
+  return password;
 }
 
 export function loadConfig(): Config {
@@ -40,6 +52,13 @@ export function loadConfig(): Config {
 
   const cleanNametag = nametag.replace("@unicity", "").replace("@", "").trim();
 
+  // Admin password - use env var or generate one
+  let adminPassword = process.env.ADMIN_PASSWORD;
+  if (!adminPassword) {
+    adminPassword = generatePassword();
+    console.error(`Generated admin password: ${adminPassword}`);
+  }
+
   return {
     relayUrl: process.env.NOSTR_RELAY_URL || "wss://nostr-relay.testnet.unicity.network",
     aggregatorUrl: process.env.AGGREGATOR_URL || "https://goggregator-test.unicity.network",
@@ -51,5 +70,6 @@ export function loadConfig(): Config {
     dayPassDurationHours: parseInt(process.env.DAY_PASS_HOURS || "24", 10),
     paymentTimeoutSeconds: parseInt(process.env.PAYMENT_TIMEOUT_SECONDS || "120", 10),
     dataDir: process.env.DATA_DIR || "./data",
+    adminPassword,
   };
 }
