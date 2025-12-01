@@ -8,6 +8,7 @@ MCP (Model Context Protocol) server for the Unicity gaming platform. Provides LL
 - **Nostr Integration**: Payment requests sent via Nostr protocol
 - **Unicity Blockchain**: Uses nametags for identity and payment routing
 - **Auto Identity**: Server creates its own blockchain identity on first run
+- **HTTP Transport**: Supports both legacy SSE and modern Streamable HTTP
 
 ## Available Games
 
@@ -24,9 +25,36 @@ MCP (Model Context Protocol) server for the Unicity gaming platform. Provides LL
 | `list_games` | - | List all available games |
 | `check_access` | `unicity_id` | Check access status and day pass validity |
 | `get_game` | `unicity_id`, `game` | Get access to a specific game (initiates payment if needed) |
-| `confirm_payment` | `unicity_id` | Wait for payment confirmation |
+| `confirm_payment` | `unicity_id`, `game` (optional) | Wait for payment confirmation |
+| `get_wallet_balance` | `password` | Get MCP wallet balance (admin) |
 
 All tools that require user identity take `unicity_id` as a parameter, making the API stateless and suitable for multi-user scenarios.
+
+## HTTP Endpoints
+
+The server runs on HTTP (default port 3001) with two transport protocols:
+
+### Legacy SSE (MCP Inspector, older clients)
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/sse` | GET | Establish SSE stream, returns POST endpoint |
+| `/messages?sessionId=xxx` | POST | Send JSON-RPC messages |
+
+### Streamable HTTP (modern clients)
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/mcp` | POST | Send JSON-RPC requests |
+| `/mcp` | GET | SSE stream for responses |
+
+Session ID is passed via `mcp-session-id` header.
+
+### Health Check
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/health` | GET | Returns `{ status, sseSessions, httpSessions }` |
 
 ## Quick Start
 
@@ -63,42 +91,27 @@ docker compose logs -f
 
 ## Testing the MCP
 
-MCP uses stdio transport, so you can't directly curl it. Here are ways to test:
-
 ### Option 1: MCP Inspector (Recommended)
 
 The MCP Inspector provides a web UI to interact with the server:
 
 ```bash
-# Build first
-npm run build
+# Start the server
+npm run build && npm start
 
-# Run with inspector
-npx @modelcontextprotocol/inspector node build/index.js
+# In another terminal, connect inspector to HTTP endpoint
+npx @modelcontextprotocol/inspector --url http://localhost:3001/sse
 ```
 
 This opens a browser UI where you can call tools interactively.
 
-### Option 2: Direct stdio (Manual)
-
-You can pipe JSON-RPC messages directly:
+### Option 2: curl (Health Check)
 
 ```bash
-# Build and run
-npm run build
-
-# Send a tool call via stdin
-echo '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | node build/index.js
+curl http://localhost:3001/health
 ```
 
-### Option 3: Test with Docker
-
-```bash
-# Attach to running container and send commands
-docker exec -i sphere-mcp-gaming sh -c 'echo "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}" | node build/index.js'
-```
-
-### Option 4: Claude Desktop Integration
+### Option 3: Claude Desktop Integration
 
 Add to your Claude Desktop config (`~/Library/Application Support/Claude/claude_desktop_config.json` on macOS):
 
@@ -106,25 +119,7 @@ Add to your Claude Desktop config (`~/Library/Application Support/Claude/claude_
 {
   "mcpServers": {
     "gaming": {
-      "command": "docker",
-      "args": ["exec", "-i", "sphere-mcp-gaming", "node", "build/index.js"]
-    }
-  }
-}
-```
-
-Or for local development:
-
-```json
-{
-  "mcpServers": {
-    "gaming": {
-      "command": "node",
-      "args": ["/path/to/sphere-mcp-gaming/build/index.js"],
-      "env": {
-        "MCP_NAMETAG": "gaming-mcp",
-        "PAYMENT_COIN_ID": "your_coin_id"
-      }
+      "url": "http://localhost:3001/sse"
     }
   }
 }
@@ -167,6 +162,8 @@ Or for local development:
 | `DAY_PASS_HOURS` | No | `24` | Day pass duration |
 | `PAYMENT_TIMEOUT_SECONDS` | No | `120` | Payment timeout |
 | `DATA_DIR` | No | `./data` | Data persistence directory |
+| `ADMIN_PASSWORD` | No | Auto-generated | Admin password for wallet access |
+| `HTTP_PORT` | No | `3001` | HTTP server port |
 
 ## Data Persistence
 
@@ -198,7 +195,7 @@ npm run dev
 ```
 ┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐
 │   LLM Client    │────▶│   MCP Server    │────▶│  Nostr Relay    │
-│ (Claude, etc.)  │     │ (stdio transport)│     │                 │
+│ (Claude, etc.)  │     │ (HTTP transport)│     │                 │
 └─────────────────┘     └─────────────────┘     └─────────────────┘
                                │                        │
                                ▼                        ▼

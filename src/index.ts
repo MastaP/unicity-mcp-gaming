@@ -1,6 +1,9 @@
 import "dotenv/config";
+import { randomUUID } from "node:crypto";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import express, { Request, Response } from "express";
 import { z } from "zod";
 import { loadConfig, type Config } from "./config.js";
 import { IdentityService } from "./identity-service.js";
@@ -37,11 +40,6 @@ let nostrService: NostrService;
 let paymentTracker: PaymentTracker;
 let walletService: WalletService;
 
-const server = new McpServer({
-  name: "sphere-gaming",
-  version: "1.0.0",
-});
-
 // Helper: Resolve and cache pubkey for a unicity_id
 async function resolvePubkey(unicityId: string): Promise<string | null> {
   const cleanId = unicityId.replace("@unicity", "").replace("@", "").trim();
@@ -66,8 +64,10 @@ function cleanUnicityId(unicityId: string): string {
   return unicityId.replace("@unicity", "").replace("@", "").trim();
 }
 
-// Tool: Check access status
-server.tool(
+// Register all tools on an MCP server
+function registerTools(server: McpServer): void {
+  // Tool: Check access status
+  server.tool(
   "check_access",
   "Check access status and day pass validity for a Unicity ID",
   {
@@ -452,8 +452,8 @@ server.tool(
         isError: true,
       };
     }
-  }
-);
+  });
+}
 
 async function main() {
   console.error("Starting Sphere Gaming MCP Server...");
@@ -477,9 +477,8 @@ async function main() {
   nostrService = new NostrService(config, identityService);
   await nostrService.connect();
 
-  // Start MCP server
-  const transport = new StdioServerTransport();
-  await server.connect(transport);
+  // Start HTTP server
+  await startHttpServer(config.httpPort);
 
   console.error("=".repeat(60));
   console.error("Sphere Gaming MCP Server is ready!");
@@ -487,7 +486,111 @@ async function main() {
   console.error(`  Relay: ${config.relayUrl}`);
   console.error(`  Payment amount: ${config.amount}`);
   console.error(`  Day pass duration: ${config.dayPassDurationHours}h`);
+  console.error(`  HTTP port: ${config.httpPort}`);
   console.error("=".repeat(60));
+}
+
+// Legacy SSE transports (for MCP Inspector and older clients)
+const sseTransports = new Map<string, SSEServerTransport>();
+
+// Streamable HTTP transports (modern MCP clients)
+const httpTransports = new Map<string, StreamableHTTPServerTransport>();
+
+async function startHttpServer(port: number): Promise<void> {
+  const app = express();
+  app.use(express.json());
+
+  // ===========================================
+  // Legacy SSE Transport (for MCP Inspector)
+  // ===========================================
+
+  // GET /sse - establish SSE stream
+  app.get("/sse", async (req: Request, res: Response) => {
+    const transport = new SSEServerTransport("/messages", res);
+    sseTransports.set(transport.sessionId, transport);
+
+    const server = new McpServer({
+      name: "sphere-gaming",
+      version: "1.0.0",
+    });
+    registerTools(server);
+
+    res.on("close", () => {
+      sseTransports.delete(transport.sessionId);
+      console.error(`SSE session closed: ${transport.sessionId}`);
+    });
+
+    await server.connect(transport);
+    console.error(`SSE session created: ${transport.sessionId}`);
+  });
+
+  // POST /messages - receive messages for SSE transport
+  app.post("/messages", async (req: Request, res: Response) => {
+    const sessionId = req.query.sessionId as string;
+    const transport = sseTransports.get(sessionId);
+
+    if (!transport) {
+      res.status(404).json({ error: "SSE session not found" });
+      return;
+    }
+
+    await transport.handlePostMessage(req, res, req.body);
+  });
+
+  // ===========================================
+  // Streamable HTTP Transport (modern clients)
+  // ===========================================
+
+  app.all("/mcp", async (req: Request, res: Response) => {
+    const sessionId = req.headers["mcp-session-id"] as string | undefined;
+
+    if (!sessionId || !httpTransports.has(sessionId)) {
+      const transport = new StreamableHTTPServerTransport({
+        sessionIdGenerator: () => randomUUID(),
+        onsessioninitialized: (newSessionId) => {
+          httpTransports.set(newSessionId, transport);
+          console.error(`HTTP session created: ${newSessionId}`);
+        },
+        onsessionclosed: (closedSessionId) => {
+          httpTransports.delete(closedSessionId);
+          console.error(`HTTP session closed: ${closedSessionId}`);
+        },
+      });
+
+      const server = new McpServer({
+        name: "sphere-gaming",
+        version: "1.0.0",
+      });
+      registerTools(server);
+
+      await server.connect(transport);
+      await transport.handleRequest(req, res, req.body);
+      return;
+    }
+
+    const transport = httpTransports.get(sessionId);
+    if (transport) {
+      await transport.handleRequest(req, res, req.body);
+    } else {
+      res.status(404).json({ error: "Session not found" });
+    }
+  });
+
+  // ===========================================
+  // Health check
+  // ===========================================
+
+  app.get("/health", (_req: Request, res: Response) => {
+    res.json({
+      status: "ok",
+      sseSessions: sseTransports.size,
+      httpSessions: httpTransports.size,
+    });
+  });
+
+  app.listen(port, () => {
+    console.error(`HTTP server listening on port ${port}`);
+  });
 }
 
 main().catch((error) => {

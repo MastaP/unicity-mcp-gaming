@@ -37,5 +37,9 @@ ENV DATA_DIR=/app/data
 # PAYMENT_AMOUNT - Payment amount in smallest units
 # DAY_PASS_HOURS - Day pass duration in hours
 # PAYMENT_TIMEOUT_SECONDS - Payment confirmation timeout
+# HTTP_PORT - Port for HTTP transport (default 3001)
+
+# Expose HTTP port if enabled
+EXPOSE 3001
 
 CMD ["node", "build/index.js"]

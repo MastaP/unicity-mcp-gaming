@@ -25,6 +25,9 @@ export interface Config {
 
   // Admin password for sensitive operations
   adminPassword: string;
+
+  // HTTP port for MCP transport
+  httpPort: number;
 }
 
 function generatePassword(): string {
@@ -71,5 +74,6 @@ export function loadConfig(): Config {
     paymentTimeoutSeconds: parseInt(process.env.PAYMENT_TIMEOUT_SECONDS || "120", 10),
     dataDir: process.env.DATA_DIR || "./data",
     adminPassword,
+    httpPort: parseInt(process.env.HTTP_PORT || "3001", 10),
   };
 }
