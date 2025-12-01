@@ -498,6 +498,19 @@ const httpTransports = new Map<string, StreamableHTTPServerTransport>();
 
 async function startHttpServer(port: number): Promise<void> {
   const app = express();
+
+  // CORS middleware
+  app.use((req, res, next) => {
+    res.header("Access-Control-Allow-Origin", "*");
+    res.header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
+    res.header("Access-Control-Allow-Headers", "Content-Type, mcp-session-id");
+    if (req.method === "OPTIONS") {
+      res.sendStatus(204);
+      return;
+    }
+    next();
+  });
+
   app.use(express.json());
 
   // ===========================================
