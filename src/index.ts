@@ -337,13 +337,33 @@ server.tool(
       };
     }
 
-    // Send new payment request and wait
-    const { waitForPayment } = await nostrService.sendPaymentRequest(
-      unicityId,
-      pubkey
-    );
+    // Check if there's already a pending payment for this user
+    const existingEventId = nostrService.getPendingPaymentForUser(unicityId);
+    let paymentReceived: boolean;
 
-    const paymentReceived = await waitForPayment();
+    if (existingEventId) {
+      // Wait for existing pending payment
+      console.error(`Waiting for existing pending payment ${existingEventId.slice(0, 16)}... for user ${unicityId}`);
+      const existingPromise = nostrService.waitForExistingPayment(existingEventId);
+      if (existingPromise) {
+        paymentReceived = await existingPromise;
+      } else {
+        // Pending payment was resolved between check and wait, re-check pass status
+        paymentReceived = paymentTracker.hasValidPass(unicityId);
+      }
+    } else {
+      // No existing pending payment - re-check pass status in case payment arrived
+      if (paymentTracker.hasValidPass(unicityId)) {
+        paymentReceived = true;
+      } else {
+        // Send a new request
+        const { waitForPayment } = await nostrService.sendPaymentRequest(
+          unicityId,
+          pubkey
+        );
+        paymentReceived = await waitForPayment();
+      }
+    }
 
     if (paymentReceived) {
       const pass = paymentTracker.grantDayPass(unicityId);
@@ -475,6 +495,13 @@ async function main() {
   // Initialize Nostr service
   console.error("Connecting to Nostr...");
   nostrService = new NostrService(config, identityService);
+
+  // Set up callback to grant day pass when payment is received
+  nostrService.setPaymentConfirmedCallback((unicityId) => {
+    console.error(`Granting day pass to ${unicityId} via payment callback`);
+    paymentTracker.grantDayPass(unicityId);
+  });
+
   await nostrService.connect();
 
   // Start HTTP server
