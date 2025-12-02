@@ -233,11 +233,42 @@ server.tool(
       };
     }
 
-    // No valid pass - initiate payment
-    const { eventId } = await nostrService.sendPaymentRequest(
+    // No valid pass - initiate payment and wait for confirmation
+    const { eventId, waitForPayment } = await nostrService.sendPaymentRequest(
       unicityId,
       pubkey
     );
+
+    console.error(`[get_game] Payment request sent, waiting for payment (timeout: ${config.paymentTimeoutSeconds}s)...`);
+
+    const paymentReceived = await waitForPayment();
+
+    if (paymentReceived) {
+      const pass = paymentTracker.grantDayPass(unicityId);
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify(
+              {
+                status: "payment_confirmed",
+                message: "Payment received! Day pass granted.",
+                game: {
+                  id: normalizedId,
+                  name: gameData.name,
+                  url: gameData.url,
+                  description: gameData.description,
+                },
+                validUntil: new Date(pass.expiresAt).toISOString(),
+                remainingTime: paymentTracker.formatRemainingTime(unicityId),
+              },
+              null,
+              2
+            ),
+          },
+        ],
+      };
+    }
 
     return {
       content: [
@@ -245,17 +276,16 @@ server.tool(
           type: "text" as const,
           text: JSON.stringify(
             {
-              status: "payment_required",
-              message: `Payment request sent to your wallet (@${unicityId}). Please approve the payment to get a day pass.`,
+              status: "payment_timeout",
+              message: `Payment not received within ${config.paymentTimeoutSeconds} seconds. Please try again.`,
               paymentRequestEventId: eventId,
-              timeoutSeconds: config.paymentTimeoutSeconds,
-              nextStep: `Use confirm_payment with unicity_id "${unicityId}" to wait for payment confirmation.`,
             },
             null,
             2
           ),
         },
       ],
+      isError: true,
     };
   }
 );
