@@ -269,7 +269,6 @@ export class NostrService {
     }
   }
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private async finalizeTransfer(
     sourceToken: Token<any>,
     transferTx: TransferTransaction
