@@ -61,8 +61,25 @@ export class NostrService {
     this.keyManager = NostrKeyManager.fromPrivateKey(secretKey);
     console.error(`[NostrService] KeyManager created, pubkey: ${this.keyManager.getPublicKeyHex()}`);
 
-    this.client = new NostrClient(this.keyManager, { queryTimeoutMs: 15000 });
-    console.error(`[NostrService] NostrClient created (queryTimeout: 15s), connecting...`);
+    this.client = new NostrClient(this.keyManager, {
+      queryTimeoutMs: 15000,
+      autoReconnect: true,
+      pingIntervalMs: 30000,
+    });
+
+    // Monitor connection state
+    this.client.addConnectionListener({
+      onConnect: (url) => console.error(`[NostrService] Connected to ${url}`),
+      onDisconnect: (url, reason) => console.error(`[NostrService] Disconnected from ${url}: ${reason}`),
+      onReconnecting: (url, attempt) => console.error(`[NostrService] Reconnecting to ${url} (attempt ${attempt})...`),
+      onReconnected: (url) => {
+        console.error(`[NostrService] Reconnected to ${url}`);
+        // Re-subscribe to payments after reconnect
+        this.subscribeToPayments();
+      },
+    });
+
+    console.error(`[NostrService] NostrClient created (queryTimeout: 15s, autoReconnect: on), connecting...`);
 
     await this.client.connect(this.config.relayUrl);
     this.connected = true;
@@ -337,16 +354,13 @@ export class NostrService {
     }
   }
 
-  async resolvePubkey(unicityId: string, maxRetries: number = 5): Promise<string | null> {
+  async resolvePubkey(unicityId: string, maxRetries: number = 3): Promise<string | null> {
     if (!this.client) {
       throw new Error("Nostr client not connected");
     }
     const cleanId = unicityId.replace("@unicity", "").replace("@", "").trim();
     console.error(`[NostrService] ----------------------------------------`);
     console.error(`[NostrService] Resolving pubkey for nametag: "${cleanId}"`);
-    console.error(`[NostrService] Client connected: ${this.connected}`);
-
-    let consecutiveTimeouts = 0;
 
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       const startTime = Date.now();
@@ -364,19 +378,8 @@ export class NostrService {
       const isTimeout = elapsed >= 14900;
       console.error(`[NostrService] Attempt ${attempt} failed: ${isTimeout ? 'TIMEOUT (15s)' : 'No matching events'} (${elapsed}ms)`);
 
-      if (isTimeout) {
-        consecutiveTimeouts++;
-        // After 2 consecutive timeouts, try reconnecting
-        if (consecutiveTimeouts >= 2 && attempt < maxRetries) {
-          console.error(`[NostrService] Multiple timeouts detected, reconnecting to relay...`);
-          await this.reconnect();
-        }
-      } else {
-        consecutiveTimeouts = 0;
-      }
-
       if (attempt < maxRetries) {
-        const delay = 500 * attempt;
+        const delay = 1000 * attempt;
         console.error(`[NostrService] Retrying in ${delay}ms...`);
         await new Promise(resolve => setTimeout(resolve, delay));
       }
@@ -385,27 +388,6 @@ export class NostrService {
     console.error(`[NostrService] FAILED: No pubkey found for nametag "${cleanId}" after ${maxRetries} attempts`);
     console.error(`[NostrService] ----------------------------------------`);
     return null;
-  }
-
-  private async reconnect(): Promise<void> {
-    if (!this.client || !this.keyManager) return;
-
-    try {
-      console.error(`[NostrService] Disconnecting from relay...`);
-      this.client.disconnect();
-      this.connected = false;
-
-      console.error(`[NostrService] Reconnecting to ${this.config.relayUrl}...`);
-      await this.client.connect(this.config.relayUrl);
-      this.connected = true;
-
-      // Re-subscribe to payments
-      this.subscribeToPayments();
-
-      console.error(`[NostrService] Reconnected successfully`);
-    } catch (err) {
-      console.error(`[NostrService] Reconnection failed:`, err);
-    }
   }
 
   async sendPaymentRequest(
